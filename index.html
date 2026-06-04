@@ -364,6 +364,7 @@ a{color:var(--pur)}
 const SUPABASE_URL = "https://jxqtggajabevmpzpxhtk.supabase.co";
 const SUPABASE_KEY = "sb_publishable_TJ8ChS2A0qlBNPE6JwsKnA_b382P3AR"; // sb_publishable_...
 const TMDB_KEY     = "f55148eb9c5f84d935845bc4510abe6e";
+const GOOGLE_PLACES_KEY = "AIzaSyAD3vr_u-0NJkRURtf8nxWbXeil-WtJviI"; // ← replace with your key
 const IMG = "https://image.tmdb.org/t/p/w342";
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -466,7 +467,7 @@ const ICONS={
 };
 const CATS=[
  {v:"entertainment",name:"Entertainment",sub:"Movies & TV",a:["#8b5cf6","#ec4899"],glow:"rgba(139,92,246,.55)",icon:ICONS.clap,active:true},
- {v:"dining",name:"Dining",sub:"Restaurants",a:["#f59e0b","#ef4444"],glow:"rgba(245,158,11,.5)",icon:ICONS.fork},
+ {v:"dining",name:"Dining",sub:"Restaurants",a:["#f59e0b","#ef4444"],glow:"rgba(245,158,11,.5)",icon:ICONS.fork,active:true},
  {v:"places",name:"Places",sub:"Spots to go",a:["#14b8a6","#06b6d4"],glow:"rgba(20,184,166,.5)",icon:ICONS.pin},
  {v:"theater",name:"Theater",sub:"Broadway & live",a:["#fb7185","#e11d48"],glow:"rgba(251,113,133,.5)",icon:ICONS.mask},
  {v:"music",name:"Music",sub:"Albums & gigs",a:["#6366f1","#22d3ee"],glow:"rgba(99,102,241,.5)",icon:ICONS.note},
@@ -480,7 +481,7 @@ function renderHubTiles(){
     return '<button '+base+'><span class="lock">Soon</span>'+medallion(c)+'<span class="cat-name">'+c.name+'</span><span class="cat-sub">'+c.sub+'</span></button>';
   }).join("");
   document.querySelectorAll("#catGrid .cat-tile").forEach(t=> t.addEventListener("click", ()=>{
-    if(t.dataset.v==="entertainment") enterCategory(); else showTeaser(t.dataset.v);
+    if(t.dataset.v==="entertainment") enterCategory(); else if(t.dataset.v==="dining") enterDining(); else showTeaser(t.dataset.v);
   }));
   updateHubCounts();
 }
@@ -716,6 +717,373 @@ function showToast(msg){ const t=el("toast"); t.textContent=msg; t.classList.add
 initGenreSelect();
 renderHubTiles();
 (async function(){ const {data}=await sb.auth.getSession(); session=data.session; route(); })();
+
+/* ============================================================
+   DINING MODULE
+   ============================================================ */
+
+const DINING_QUESTIONS = [
+  {id:"food",    label:"How was the food?",          opts:[["Outstanding",3],["Really good",2],["Fine",1],["Disappointing",0]]},
+  {id:"vibe",    label:"How was the atmosphere?",    opts:[["Loved it",3],["Nice enough",2],["Bland",1],["Off-putting",0]]},
+  {id:"service", label:"How was the service?",       opts:[["Exceptional",2],["Good",1],["Lacking",0]]},
+  {id:"value",   label:"Was it worth the price?",    opts:[["Absolutely",2],["Mostly",1],["Not really",0]]}
+];
+
+const CUISINE_COLORS = {
+  "Italian":["#f97316","#b45309"],"Pizza":["#ef4444","#b91c1c"],"Thai":["#10b981","#065f46"],
+  "American":["#3b82f6","#1d4ed8"],"French":["#8b5cf6","#5b21b6"],"Japanese":["#f43f5e","#9f1239"],
+  "Steakhouse":["#b45309","#78350f"],"Burgers":["#f59e0b","#92400e"],"Deli":["#6366f1","#3730a3"],
+  "Asian":["#06b6d4","#0e7490"],"Vegetarian":["#22c55e","#14532d"],"Gastropub":["#a855f7","#6b21a8"],
+  "French Seafood":["#0ea5e9","#0c4a6e"],"Seafood":["#0ea5e9","#0c4a6e"]
+};
+function dColorFor(c){ return CUISINE_COLORS[c]||["#f59e0b","#b45309"]; }
+
+let DINING_CATALOG = [], dTracked = {}, dTab = "dDiscover";
+let dFilterCuisine = "all", dFilterPrice = "all", dSearchQ = "";
+let dModalItem = null, dAnswers = {};
+
+async function loadDiningCatalog(){
+  try{
+    const r = await fetch("./dining-catalog.json?_="+Date.now());
+    DINING_CATALOG = await r.json();
+  } catch(e){ DINING_CATALOG = []; }
+}
+
+async function loadDiningTracked(){
+  dTracked = {};
+  const {data, error} = await sb.from("tracked_items").select("*").eq("vertical","dining");
+  if(!error && data){ data.forEach(r => dTracked[r.tmdb_id] = r); }
+}
+
+async function enterDining(){
+  hideScreens();
+  el("dining").classList.remove("hidden");
+  const email = session.user.email||"";
+  el("dUserEmail").textContent = email;
+  el("dUserAv").textContent = (email[0]||"?").toUpperCase();
+  await loadDiningCatalog();
+  await loadDiningTracked();
+  initCuisineSelect();
+  showDiningTab("dDiscover");
+}
+el("diningHomeBtn").addEventListener("click", showHub);
+
+function initCuisineSelect(){
+  const cuisines = [...new Set(DINING_CATALOG.map(r=>r.cuisine))].sort();
+  el("dCuisineSel").innerHTML = '<option value="all">All cuisines</option>' +
+    cuisines.map(c=>'<option value="'+c+'">'+c+'</option>').join("");
+}
+
+function loadDiningDiscover(){
+  const grid = el("dDiscoverGrid");
+  if(dSearchQ.length > 1) return dLiveSearch();
+  let items = DINING_CATALOG.filter(r=>{
+    if(dFilterCuisine !== "all" && r.cuisine !== dFilterCuisine) return false;
+    if(dFilterPrice !== "all" && r.price !== dFilterPrice) return false;
+    return true;
+  });
+  el("dDiscoverCount").textContent = items.length + " restaurants";
+  grid.innerHTML = items.length ? items.map(dCardHTML).join("") : '<div class="empty">No restaurants found.</div>';
+}
+
+async function dLiveSearch(){
+  const grid = el("dDiscoverGrid");
+  const aiBox = el("dAiResults");
+  grid.innerHTML = '<div class="empty">Searching...</div>';
+  const local = DINING_CATALOG.filter(r =>
+    r.name.toLowerCase().includes(dSearchQ.toLowerCase()) ||
+    r.cuisine.toLowerCase().includes(dSearchQ.toLowerCase()) ||
+    r.neighborhood.toLowerCase().includes(dSearchQ.toLowerCase())
+  );
+  if(local.length){
+    el("dDiscoverCount").textContent = local.length + " matches";
+    grid.innerHTML = local.map(dCardHTML).join("");
+  } else {
+    grid.innerHTML = '<div class="empty">No local matches found.</div>';
+  }
+  await dAiSuggest(dSearchQ, aiBox);
+}
+
+async function dAiSuggest(query, box){
+  box.style.display = "block";
+  box.innerHTML = '<div style="color:#f59e0b;font-size:12px;font-family:monospace;padding:10px">Thinking...</div>';
+  try{
+    const res = await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        model:"claude-sonnet-4-20250514",
+        max_tokens:400,
+        messages:[{role:"user",content:'NYC restaurant recommendations for: "'+query+'". Return JSON array of 3 restaurants: [{"name":"...","cuisine":"...","neighborhood":"...","price":"$$","why":"one punchy sentence why it fits"}]. Return ONLY valid JSON, no markdown or explanation.'}]
+      })
+    });
+    const data = await res.json();
+    const text = data.content?.[0]?.text||"[]";
+    const clean = text.replace(/```json|```/g,"").trim();
+    const parsed = JSON.parse(clean);
+    box.innerHTML = '<div style="font-size:10px;font-weight:700;letter-spacing:1.5px;color:#f59e0b;font-family:monospace;margin-bottom:10px">AI PICKS FOR "'+query.toUpperCase()+'"</div>'
+      + parsed.map(function(r){
+        const c = dColorFor(r.cuisine);
+        return '<div style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:12px;padding:12px 14px;margin-bottom:8px;display:flex;gap:12px;align-items:flex-start">'
+          +'<div style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,'+c[0]+','+c[1]+');flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:18px">'+String.fromCodePoint(0x1F374)+'</div>'
+          +'<div><div style="font-weight:700;color:#f5f0e8;font-size:14px">'+r.name+'</div>'
+          +'<div style="font-size:11px;color:#888;margin:2px 0">'+r.cuisine+' | '+r.neighborhood+' | '+r.price+'</div>'
+          +'<div style="font-size:12px;color:#aaa;font-style:italic">'+r.why+'</div></div></div>';
+      }).join("");
+  } catch(e){
+    box.style.display="none";
+  }
+}
+
+function dCardHTML(r){
+  const t = dTracked[r.id];
+  const c = dColorFor(r.cuisine);
+  const statusBtns = '<div class="statusrow" data-did="'+r.id+'">'
+    +'<button class="want '+(t&&t.status==="want"?"on":"")+'\" data-s="want">Want</button>'
+    +'<button class="watching '+(t&&t.status==="visiting"?"on":"")+'\" data-s="visiting">Going</button>'
+    +'<button class="watched '+(t&&t.status==="visited"?"on":"")+'\" data-s="visited">Visited</button>'
+    +'</div>';
+  const ratingBadge = (t&&t.status==="visited"&&t.rating!=null)
+    ? '<div class="badge-rating">'+Number(t.rating).toFixed(1)+'</div>' : "";
+  const gRating = r.google_rating ? '<div class="badge-vote">&#9733; '+r.google_rating+'</div>' : "";
+  return '<div class="card">'
+    +'<div class="poster" style="aspect-ratio:4/3">'
+    +'<div style="width:100%;height:100%;background:linear-gradient(135deg,'+c[0]+','+c[1]+');display:flex;align-items:center;justify-content:center;font-size:40px">'+String.fromCodePoint(0x1F374)+'</div>'
+    +'<div class="ptype">'+r.cuisine+'</div>'
+    +gRating+ratingBadge
+    +'<div class="pscrim"><div class="ptitle">'+r.name+'</div><div class="pmeta">'+r.neighborhood+' | '+r.price+'</div></div>'
+    +'</div>'
+    +'<div class="cbody"><div class="cgenres">'+r.tags.slice(0,3).join(" | ")+'</div>'+statusBtns+'</div>'
+    +'</div>';
+}
+
+document.body.addEventListener("click", function(e){
+  const btn = e.target.closest('[data-did] button');
+  if(!btn) return;
+  const did = btn.parentElement.dataset.did;
+  if(!did) return;
+  const s = btn.dataset.s;
+  const r = DINING_CATALOG.find(x=>x.id===did) || (dTracked[did] ? {id:did,name:dTracked[did].title,cuisine:(dTracked[did].genres&&dTracked[did].genres[0])||"",neighborhood:"",price:"",tags:[],google_rating:null} : null);
+  if(!r) return;
+  if(s==="visited"){
+    if(dTracked[did]&&dTracked[did].status==="visited"){ dSetStatus(r,"visited"); return; }
+    openDiningModal(r); return;
+  }
+  dSetStatus(r, s);
+});
+
+async function dSetStatus(r, status){
+  const existing = dTracked[r.id];
+  if(existing && existing.status === status){
+    await sb.from("tracked_items").delete().eq("id", existing.id);
+    delete dTracked[r.id];
+  } else {
+    const row = {user_id:session.user.id, vertical:"dining", tmdb_id:r.id, media_type:"restaurant",
+      title:r.name, year:null, genres:[r.cuisine], poster_path:null,
+      status, updated_at:new Date().toISOString()};
+    if(existing){ row.rating=existing.rating; row.answers=existing.answers; row.rated_at=existing.rated_at; }
+    const {data} = await sb.from("tracked_items").upsert(row, {onConflict:"user_id,tmdb_id,media_type"}).select().maybeSingle();
+    dTracked[r.id] = data || Object.assign({id:existing&&existing.id}, row);
+  }
+  dRefresh();
+}
+
+async function dSaveVisited(r, rating, answers){
+  const row = {user_id:session.user.id, vertical:"dining", tmdb_id:r.id, media_type:"restaurant",
+    title:r.name, year:null, genres:[r.cuisine], poster_path:null,
+    status:"visited", rating, answers, rated_at:new Date().toISOString(), updated_at:new Date().toISOString()};
+  const {data} = await sb.from("tracked_items").upsert(row, {onConflict:"user_id,tmdb_id,media_type"}).select().maybeSingle();
+  dTracked[r.id] = data || row;
+  dRefresh();
+}
+
+function openDiningModal(r){
+  dModalItem = r; dAnswers = {};
+  el("dModalTitle").textContent = r.name + " | " + r.cuisine;
+  el("dModalQuestions").innerHTML = DINING_QUESTIONS.map(function(q){
+    return '<div class="q"><div class="ql">'+q.label+'</div><div class="opts">'+
+    q.opts.map(function(o){ return '<label><input type="radio" name="'+q.id+'" value="'+o[1]+'"> '+o[0]+'</label>'; }).join("")+
+    '</div></div>';
+  }).join("");
+  dUpdateLive();
+  el("dOverlay").classList.add("show");
+}
+function dUpdateLive(){
+  const answered = Object.keys(dAnswers).length, total = DINING_QUESTIONS.length;
+  const raw = Object.values(dAnswers).reduce(function(s,v){return s+v;},0);
+  if(answered===total){ el("dLiveScore").textContent=raw.toFixed(1); el("dLiveStars").textContent=starsSimple(raw); el("dModalSave").disabled=false; }
+  else { el("dLiveScore").textContent=answered+"/"+total; el("dLiveStars").textContent=starsSimple(raw); el("dModalSave").disabled=true; }
+}
+el("dModalQuestions").addEventListener("change", function(e){
+  if(e.target.name){ dAnswers[e.target.name]=parseInt(e.target.value,10);
+    const opts=e.target.closest(".opts"); opts.querySelectorAll("label").forEach(function(l){l.classList.remove("sel");}); e.target.closest("label").classList.add("sel"); dUpdateLive(); }
+});
+el("dModalSave").addEventListener("click", async function(){
+  if(Object.keys(dAnswers).length < DINING_QUESTIONS.length) return;
+  const rating = Object.values(dAnswers).reduce(function(s,v){return s+v;},0);
+  el("dModalSave").disabled=true;
+  await dSaveVisited(dModalItem, rating, dAnswers);
+  el("dOverlay").classList.remove("show"); dModalItem=null; dAnswers={};
+});
+el("dModalCancel").addEventListener("click", function(){ el("dOverlay").classList.remove("show"); dModalItem=null; dAnswers={}; });
+el("dOverlay").addEventListener("click", function(e){ if(e.target.id==="dOverlay"){ el("dOverlay").classList.remove("show"); dModalItem=null; dAnswers={}; } });
+
+let dLibStatus = "visited";
+function renderDiningLibrary(){
+  const body = el("dLibraryBody");
+  const items = Object.values(dTracked).filter(function(t){return t.status===dLibStatus;});
+  el("dLibCount").textContent = items.length + " restaurant"+(items.length===1?"":"s");
+  if(!items.length){
+    const l = dLibStatus==="visited"?"visited":dLibStatus==="visiting"?"planning to visit":"on your want list";
+    body.innerHTML='<div class="empty">Nothing '+l+' yet.<br><b>Head to Discover</b> to add restaurants.</div>'; return;
+  }
+  const groups = {};
+  items.forEach(function(t){ const g = (t.genres&&t.genres[0])||"Other"; if(!groups[g]) groups[g]=[]; groups[g].push(t); });
+  body.innerHTML = Object.keys(groups).sort().map(function(g){
+    const c = dColorFor(g);
+    let arr = groups[g].slice();
+    if(dLibStatus==="visited") arr.sort(function(x,y){return (y.rating||0)-(x.rating||0);});
+    const cards = arr.map(function(t){
+      const r = DINING_CATALOG.find(function(x){return x.id===t.tmdb_id;}) || {id:t.tmdb_id,name:t.title,cuisine:g,neighborhood:"",price:"",tags:[],google_rating:null};
+      return dCardHTML(r);
+    }).join("");
+    return '<div class="shelf"><h2><span class="dot" style="background:linear-gradient(135deg,'+c[0]+','+c[1]+')"></span>'+g+' <span class="n">'+arr.length+'</span></h2><div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))">'+cards+'</div></div>';
+  }).join("");
+}
+
+function renderDiningStats(){
+  const vals = Object.values(dTracked);
+  const visited = vals.filter(function(t){return t.status==="visited";});
+  const visiting = vals.filter(function(t){return t.status==="visiting";}).length;
+  const want = vals.filter(function(t){return t.status==="want";}).length;
+  const rated = visited.filter(function(t){return t.rating!=null;});
+  const avg = rated.length ? rated.reduce(function(s,t){return s+Number(t.rating);},0)/rated.length : 0;
+  let top="—"; if(rated.length) top = rated.slice().sort(function(a,b){return Number(b.rating)-Number(a.rating);})[0].title;
+  el("dStatCards").innerHTML =
+    '<div class="stat"><div class="v">'+visited.length+'</div><div class="l">Visited</div></div>'
+    +'<div class="stat"><div class="v">'+visiting+'</div><div class="l">Planning to go</div></div>'
+    +'<div class="stat"><div class="v">'+want+'</div><div class="l">Want to try</div></div>'
+    +'<div class="stat"><div class="v">'+(avg?avg.toFixed(1):"--")+'</div><div class="l">Avg rating /10</div></div>';
+  const cc={};
+  visited.forEach(function(t){(t.genres||[]).forEach(function(g){cc[g]=(cc[g]||0)+1;});});
+  const entries=Object.entries(cc).sort(function(a,b){return b[1]-a[1];}).slice(0,8);
+  const max=entries.length?entries[0][1]:1;
+  const bars=el("dCuisineBars");
+  if(!visited.length){ bars.innerHTML='<h3>Your cuisine taste</h3><div class="empty" style="padding:30px">Rate a few visited spots to see your taste profile.</div>'; return; }
+  bars.innerHTML='<h3>What you eat most'+(top!=="—"?' | top pick: <span style="color:#fbbf24">'+top+'</span>':'')+'</h3>'
+    +entries.map(function(en){ var g=en[0],n=en[1],c=dColorFor(g);
+      return '<div class="bar"><div class="bl">'+g+'</div><div class="btrack"><div class="bfill" style="width:'+Math.round(n/max*100)+'%;background:linear-gradient(90deg,'+c[0]+','+c[1]+')"></div></div><div class="bn">'+n+'</div></div>'; }).join("");
+}
+
+function showDiningTab(t){
+  dTab = t;
+  document.querySelectorAll("#diningTabs button").forEach(function(b){b.classList.toggle("active",b.dataset.tab===t);});
+  el("dDiscover").classList.toggle("hidden",t!=="dDiscover");
+  el("dLibrary").classList.toggle("hidden",t!=="dLibrary");
+  el("dStats").classList.toggle("hidden",t!=="dStats");
+  if(t==="dDiscover") loadDiningDiscover();
+  if(t==="dLibrary") renderDiningLibrary();
+  if(t==="dStats") renderDiningStats();
+}
+document.querySelectorAll("#diningTabs button").forEach(function(b){b.addEventListener("click",function(){showDiningTab(b.dataset.tab);});});
+el("dCuisineSel").addEventListener("change",function(e){ dFilterCuisine=e.target.value; loadDiningDiscover(); });
+el("dPriceSel").addEventListener("change",function(e){ dFilterPrice=e.target.value; loadDiningDiscover(); });
+var dSearchTimer=null;
+el("dSearch").addEventListener("input",function(e){ dSearchQ=e.target.value.trim(); clearTimeout(dSearchTimer); dSearchTimer=setTimeout(loadDiningDiscover,350); });
+el("dSearch").addEventListener("keydown",function(e){ if(e.key==="Enter"&&dSearchQ.length>1){ clearTimeout(dSearchTimer); dLiveSearch(); } });
+function dRefresh(){
+  if(dTab==="dDiscover") loadDiningDiscover();
+  if(dTab==="dLibrary") renderDiningLibrary();
+  if(dTab==="dStats") renderDiningStats();
+}
+/* ============================================================
+   END DINING MODULE
+   ============================================================ */
+
 </script>
+
+<!-- ===== DINING ===== -->
+<div id="dining" class="screen hidden">
+  <div class="wrap">
+    <header class="cat-header">
+      <button class="homebtn" id="diningHomeBtn">← Hub</button>
+      <div class="cat-title-bar">
+        <span class="ic" style="display:inline-flex">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 3v5M11 3v5"/><path d="M9 8v13"/><path d="M16 3c-1.6 1.6-1.6 6.4 0 8v10"/>
+          </svg>
+        </span>
+        Dining
+      </div>
+      <div class="headright">
+        <div class="tabs" id="diningTabs">
+          <button data-tab="dDiscover" class="active">Discover</button>
+          <button data-tab="dLibrary">My List</button>
+          <button data-tab="dStats">Stats</button>
+        </div>
+        <span class="userchip"><span class="av" id="dUserAv">?</span><span id="dUserEmail"></span></span>
+      </div>
+    </header>
+
+    <section id="dDiscover">
+      <div class="controls">
+        <input type="search" id="dSearch" placeholder="Search restaurants or ask AI (press Enter)…">
+        <select id="dCuisineSel"></select>
+        <select id="dPriceSel">
+          <option value="all">All prices</option>
+          <option value="$">$ Budget</option>
+          <option value="$$">$$ Moderate</option>
+          <option value="$$$">$$$ Upscale</option>
+          <option value="$$$$">$$$$ Fine Dining</option>
+        </select>
+        <span class="count" id="dDiscoverCount"></span>
+      </div>
+      <div id="dAiResults" style="display:none;margin-bottom:16px"></div>
+      <div class="grid" id="dDiscoverGrid" style="grid-template-columns:repeat(auto-fill,minmax(200px,1fr))"></div>
+    </section>
+
+    <section id="dLibrary" class="hidden">
+      <div class="controls">
+        <div class="seg" id="dLibSeg">
+          <button data-status="visited" class="active">Visited</button>
+          <button data-status="visiting">Visiting</button>
+          <button data-status="want">Want to Try</button>
+        </div>
+        <span class="count" id="dLibCount"></span>
+      </div>
+      <div id="dLibraryBody"></div>
+    </section>
+
+    <section id="dStats" class="hidden">
+      <div class="stats-grid" id="dStatCards"></div>
+      <div class="bars" id="dCuisineBars"></div>
+    </section>
+  </div>
+</div>
+
+<!-- dining rating modal -->
+<div class="overlay" id="dOverlay">
+  <div class="modal">
+    <div class="mhead">
+      <div class="mt" id="dModalTitle"></div>
+      <div class="ms">How was the experience?</div>
+    </div>
+    <div class="mbody" id="dModalQuestions"></div>
+    <div class="mbody" style="padding-top:0">
+      <div class="live">
+        <div>
+          <div class="ll">Your rating</div>
+          <div class="stars" id="dLiveStars">☆☆☆☆☆</div>
+        </div>
+        <div class="lv" id="dLiveScore">–</div>
+      </div>
+    </div>
+    <div class="mfoot">
+      <button class="cancel" id="dModalCancel">Cancel</button>
+      <button class="save" id="dModalSave" disabled>Save to Visited</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
